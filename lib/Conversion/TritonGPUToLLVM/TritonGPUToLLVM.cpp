@@ -902,7 +902,7 @@ struct LoadOpConversion
             gcnBuilder.create<GCNMemInstr>("global_load")->type(valueElemNbits);
         unsigned offset = wordIdx * (valueElemNbits / 8);
         auto *offsetMod =
-            gcnBuilder.newModifier("offset", std::to_string(offset));
+            gcnBuilder.newModifier(", off offset", std::to_string(offset));
         gload({dstsOpr->listGet(wordIdx), addrOpr}, {offsetMod});
       }
 
@@ -1145,10 +1145,10 @@ struct StoreOpConversion
       auto *asmAddr = gcnBuilder.newAddrOperand(ptrElems[vecStart], "v");
       for (size_t ii = 0; ii < nWords; ++ii) {
         auto &gstore =
-            gcnBuilder.create<GCNMemInstr>("global_store")->type(valueElemNbits);
+            *gcnBuilder.create<GCNMemInstr>("global_store_byte");
         unsigned offset = ii * (valueElemNbits / 8);
         auto *offsetMod =
-            gcnBuilder.newModifier("offset", std::to_string(offset));
+            gcnBuilder.newModifier(",off offset", std::to_string(offset));
         gstore({asmAddr, asmArgList->listGet(ii)}, {offsetMod});
       }
 
