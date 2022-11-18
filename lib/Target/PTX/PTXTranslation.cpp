@@ -29,7 +29,7 @@
 #include "llvm/Target/TargetOptions.h"
 #include "llvm/Transforms/Scalar.h"
 #include "llvm/Transforms/Utils/Cloning.h"
-#include <filesystem>
+// #include <filesystem>
 #include <regex>
 
 namespace triton {
@@ -71,17 +71,17 @@ static std::string llir_to_ptx(llvm::Module *module, int capability, int ptx) {
   }
 
   if (hasExternal) {
-    namespace fs = std::filesystem;
-    // [triton root dir]/python/triton/language/libdevice.10.bc
-    static const fs::path libdevice = fs::path(__FILE__)
-                                          .parent_path()
-                                          .parent_path()
-                                          .parent_path()
-                                          .parent_path() /
-                                      "python" / "triton" / "language" /
-                                      "libdevice.10.bc";
-    if (mlir::triton::linkExternLib(*module, libdevice.string()))
-      llvm::errs() << "link failed for: " << libdevice.string();
+    // namespace fs = std::filesystem;
+    // // [triton root dir]/python/triton/language/libdevice.10.bc
+    // static const fs::path libdevice = fs::path(__FILE__)
+    //                                       .parent_path()
+    //                                       .parent_path()
+    //                                       .parent_path()
+    //                                       .parent_path() /
+    //                                   "python" / "triton" / "language" /
+    //                                   "libdevice.10.bc";
+    // if (mlir::triton::linkExternLib(*module, libdevice.string()))
+    //   llvm::errs() << "link failed for: " << libdevice.string();
   }
 
   // please check https://llvm.org/docs/NVPTXUsage.html#reflection-parameters

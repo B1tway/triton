@@ -8,7 +8,6 @@
 namespace mlir {
 namespace triton {
 
-
 PTXInstr::Operand *
 PTXBuilder::newOperand(mlir::Value value, StringRef constraint,
                        std::function<std::string(int)> formatter) {

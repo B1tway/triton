@@ -21,6 +21,7 @@
 #include "triton/Analysis/Membar.h"
 #include "triton/Analysis/Utility.h"
 #include "triton/Conversion/MLIRTypes.h"
+#include "triton/Conversion/TritonGPUToLLVM/GcnAsmFormat.h"
 #include "triton/Conversion/TritonGPUToLLVM/PtxAsmFormat.h"
 #include "triton/Conversion/TritonToTritonGPU/TritonToTritonGPU.h"
 #include "triton/Dialect/Triton/IR/Dialect.h"
@@ -1002,7 +1003,33 @@ struct LoadOpConversion
       const size_t nWords = std::max<size_t>(1, totalWidth / width);
       const size_t wordNElems = width / valueElemNbits;
       assert(wordNElems * nWords * numVecs == numElems);
+#ifdef USE_ROCM
+      GCNBuilder gcnBuilder;
+      auto &global_load = *gcnBuilder.create<GCNMemInstr>("global_load");
 
+      const std::string readConstraint = "v";
+      const std::string writeConstraint = "=v";
+
+      auto *dstsOpr = gcnBuilder.newListOperand();
+      auto *opr = gcnBuilder.newOperand(writeConstraint); // =v operations
+      dstsOpr->listAppend(opr);
+
+      auto *addrOpr = gcnBuilder.newAddrOperand(ptrElems[vecStart], "v");
+
+      auto *offsetMod = gcnBuilder.newModifier("offset", "4");
+      auto *ldsMod = gcnBuilder.newModifier("lds", "");
+
+      global_load = global_load.type(width * 2);
+
+      global_load({dstsOpr, addrOpr}, {offsetMod, ldsMod});
+
+      SmallVector<Type> retTys(nWords, IntegerType::get(getContext(), width));
+      Type retTy = retTys.size() > 1
+                       ? LLVM::LLVMStructType::getLiteral(getContext(), retTys)
+                       : retTys[0];
+
+      Value ret = gcnBuilder.launch(rewriter, loc, retTy);
+#else
       // TODO(Superjomn) Add cache policy fields to StoreOp.
       // TODO(Superjomn) Deal with cache policy here.
       const bool hasL2EvictPolicy = false;
@@ -1089,7 +1116,7 @@ struct LoadOpConversion
       // auto asmDialectAttr = LLVM::AsmDialectAttr::get(rewriter.getContext(),
       //                                                 LLVM::AsmDialect::AD_ATT);
       Value ret = ptxBuilder.launch(rewriter, loc, retTy);
-
+#endif
       // ---
       // extract and store return values
       // ---
@@ -1114,7 +1141,6 @@ struct LoadOpConversion
         loadedVals.push_back(loaded);
       }
     } // end vec
-
     Type llvmResultStructTy = getTypeConverter()->convertType(valueTy);
     Value resultStruct =
         getStructFromElements(loc, loadedVals, rewriter, llvmResultStructTy);
@@ -1210,11 +1236,32 @@ struct StoreOpConversion
                                  loc, u32Ty, IntegerAttr::get(u32Ty, elemIdx)));
         }
         llWord = bitcast(llWord, valArgTy);
+#ifdef USE_ROCM
+        std::string constraint = "v";
+        asmArgs.emplace_back(llWord, constraint);
+#else
         std::string constraint =
             (width == 64) ? "l" : ((width == 32) ? "r" : "c");
         asmArgs.emplace_back(llWord, constraint);
+#endif
       }
+#ifdef USE_ROCM
+      GCNBuilder gcnBuilder;
+      auto *asmArgList = gcnBuilder.newListOperand(asmArgs);
+      auto *asmAddr = gcnBuilder.newAddrOperand(ptrElems[vecStart], "v");
+      auto &gcnStoreInstr =
+          gcnBuilder.create<GCNMemInstr>("global_store")->type(2 * width);
 
+      gcnStoreInstr(asmAddr, asmArgList);
+
+      Type boolTy = getTypeConverter()->convertType(rewriter.getIntegerType(1));
+      llvm::SmallVector<Type> argTys({boolTy, ptr.getType()});
+      argTys.insert(argTys.end(), nWords, valArgTy);
+
+      auto ASMReturnTy = void_ty(ctx);
+
+      gcnBuilder.launch(rewriter, loc, ASMReturnTy);
+#else
       // Prepare the PTX inline asm.
       PTXBuilder ptxBuilder;
       auto *asmArgList = ptxBuilder.newListOperand(asmArgs);
@@ -1235,6 +1282,7 @@ struct StoreOpConversion
       auto ASMReturnTy = void_ty(ctx);
 
       ptxBuilder.launch(rewriter, loc, ASMReturnTy);
+#endif
     }
     rewriter.eraseOp(op);
     return success();
@@ -1303,8 +1351,8 @@ struct BroadcastOpConversion
       // Incase there are multiple indices in the src that is actually
       // calculating the same element, srcLogicalShape may not need to be 1.
       // Such as the case when src of shape [256, 1], and with a blocked
-      // layout: sizePerThread: [1, 4];  threadsPerWarp: [1, 32]; warpsPerCTA:
-      // [1, 2]
+      // layout: sizePerThread: [1, 4];  threadsPerWarp: [1, 32];
+      // warpsPerCTA: [1, 2]
       int64_t d = resultLogicalShape[it.value()] / srcLogicalShape[it.value()];
       broadcastSizes[it.index()] = d;
       duplicates *= d;
@@ -2594,8 +2642,8 @@ LogicalResult ConvertLayoutOpConversion::lowerBlockedToShared(
   auto wordTy = vec_ty(elemTy, minVec);
 
   // TODO: [goostavz] We should make a cache for the calculation of
-  // emitBaseIndexForBlockedLayout in case backend compiler not being able to
-  // optimize that
+  // emitBaseIndexForBlockedLayout in case backend compiler not being able
+  // to optimize that
   SmallVector<Value> multiDimOffsetFirstElem =
       emitBaseIndexForBlockedLayout(loc, rewriter, srcBlockedLayout, srcShape);
   SmallVector<unsigned> srcShapePerCTA = getShapePerCTA(srcBlockedLayout);
@@ -2606,7 +2654,8 @@ LogicalResult ConvertLayoutOpConversion::lowerBlockedToShared(
   //
   // Please note that the order was not awaring of blockLayout.getOrder(),
   // thus the adjacent elems may not belong to a same word. This could be
-  // improved if we update the elements order by emitIndicesForBlockedLayout()
+  // improved if we update the elements order by
+  // emitIndicesForBlockedLayout()
   SmallVector<unsigned> wordsInEachRep(2);
   wordsInEachRep[0] = inOrd[0] == 0
                           ? srcBlockedLayout.getSizePerThread()[0] / minVec
@@ -2651,7 +2700,8 @@ LogicalResult ConvertLayoutOpConversion::lowerBlockedToShared(
       auto multiDimRepIdx = getMultiDimIndex<unsigned>(linearRepIdx, reps);
       for (unsigned linearWordIdx = 0; linearWordIdx < numWordsEachRep;
            ++linearWordIdx) {
-        // step 1: recover the multidim_index from the index of input_elements
+        // step 1: recover the multidim_index from the index of
+        // input_elements
         auto multiDimWordIdx =
             getMultiDimIndex<unsigned>(linearWordIdx, wordsInEachRep);
         SmallVector<Value> multiDimIdx(2);
@@ -2682,8 +2732,8 @@ LogicalResult ConvertLayoutOpConversion::lowerBlockedToShared(
     }
   }
   // Barrier is not necessary.
-  // The membar pass knows that it writes to shared memory and will handle it
-  // properly.
+  // The membar pass knows that it writes to shared memory and will handle
+  // it properly.
   rewriter.replaceOp(op, retVal);
   return success();
 }
@@ -2762,8 +2812,8 @@ public:
 
   int getNumPtr() const { return numPtr; }
 
-  // Compute the offset to the matrix this thread(indexed by warpOff and lane)
-  // mapped to.
+  // Compute the offset to the matrix this thread(indexed by warpOff and
+  // lane) mapped to.
   SmallVector<Value> computeLdmatrixMatOffs(Value warpId, Value lane) {
     // 4x4 matrices
     Value c = urem(lane, i32_val(8));
@@ -2778,8 +2828,9 @@ public:
     Value kMatArr = kOrder == 1 ? s1 : s0;
     Value nkMatArr = kOrder == 1 ? s0 : s1;
 
-    // matrix coordinate inside a CTA, the matrix layout is [2x2wpt] for A and
-    // [2wptx2] for B. e.g. Setting wpt=3, The data layout for A(kOrder=1) is
+    // matrix coordinate inside a CTA, the matrix layout is [2x2wpt] for A
+    // and [2wptx2] for B. e.g. Setting wpt=3, The data layout for
+    // A(kOrder=1) is
     //   |0 0 1 1 2 2| -> 0,1,2 are the warpids
     //   |0 0 1 1 2 2|
     //
@@ -2790,13 +2841,14 @@ public:
     //   |0 0|
     //   |1 1|
     //   |2 2|
-    // Note, for each warp, it handles a 2x2 matrices, that is the coordinate
-    // address (s0,s1) annotates.
+    // Note, for each warp, it handles a 2x2 matrices, that is the
+    // coordinate address (s0,s1) annotates.
 
     Value matOff[2];
-    matOff[kOrder ^ 1] = add(
-        mul(warpId, i32_val(warpOffStride)),   // warp offset
-        mul(nkMatArr, i32_val(matArrStride))); // matrix offset inside a warp
+    matOff[kOrder ^ 1] =
+        add(mul(warpId, i32_val(warpOffStride)), // warp offset
+            mul(nkMatArr,
+                i32_val(matArrStride))); // matrix offset inside a warp
     matOff[kOrder] = kMatArr;
 
     // Physical offset (before swizzling)
@@ -3247,17 +3299,18 @@ struct DotOpMmaV1ConversionHelper {
 
   // Compute the offset of the matrix to load.
   // Returns offsetAM, offsetAK, offsetBN, offsetBK.
-  // NOTE, the information M(from $a) and N(from $b) couldn't be retrieved at
-  // the same time in the usage in convert_layout[shared->dot_op], we leave the
-  // noexist info to be 0 and only use the desired argument from the composed
-  // result. In this way we want to retain the original code structure in
-  // convert_mma884 method for easier debugging.
+  // NOTE, the information M(from $a) and N(from $b) couldn't be retrieved
+  // at the same time in the usage in convert_layout[shared->dot_op], we
+  // leave the noexist info to be 0 and only use the desired argument from
+  // the composed result. In this way we want to retain the original code
+  // structure in convert_mma884 method for easier debugging.
   std::tuple<Value, Value, Value, Value>
   computeOffsets(Value threadId, bool isARow, bool isBRow, ArrayRef<int> fpw,
                  ArrayRef<int> spw, ArrayRef<int> rep,
                  ConversionPatternRewriter &rewriter, Location loc) const;
 
-  // Extract values belong to $a or $b from a LLVMStruct, the shape is n0xn1.
+  // Extract values belong to $a or $b from a LLVMStruct, the shape is
+  // n0xn1.
   ValueTable extractLoadedOperand(Value llStruct, int n0, int n1,
                                   ConversionPatternRewriter &rewriter) const;
 
@@ -3534,8 +3587,8 @@ private:
 };
 
 // This class helps to adapt the existing DotOpConversion to the latest
-// DotOpOperand layout design. It decouples the exising implementation to two
-// parts:
+// DotOpOperand layout design. It decouples the exising implementation to
+// two parts:
 // 1. loading the specific operand matrix(for $a, $b, $c) from smem
 // 2. passing the loaded value and perform the mma codegen
 struct MMA16816ConversionHelper {
@@ -3724,8 +3777,8 @@ struct MMA16816ConversionHelper {
 
   // Conduct the Dot conversion.
   // \param a, \param b, \param c and \param d are DotOp operands.
-  // \param loadedA, \param loadedB, \param loadedC, all of them are result of
-  // loading.
+  // \param loadedA, \param loadedB, \param loadedC, all of them are result
+  // of loading.
   LogicalResult convertDot(Value a, Value b, Value c, Value d, Value loadedA,
                            Value loadedB, Value loadedC, DotOp op,
                            DotOpAdaptor adaptor) const {
@@ -3801,7 +3854,8 @@ private:
                   ArrayRef<int> instrShape, ArrayRef<int> matShape,
                   Value warpId, ValueTable &vals) const {
     auto tensorTy = tensor.getType().cast<RankedTensorType>();
-    // We assumes that the input operand of Dot should be from shared layout.
+    // We assumes that the input operand of Dot should be from shared
+    // layout.
     // TODO(Superjomn) Consider other layouts if needed later.
     auto sharedLayout = tensorTy.getEncoding().cast<SharedEncodingAttr>();
     const int perPhase = sharedLayout.getPerPhase();
@@ -3997,8 +4051,8 @@ DotOpConversion::convertMMA16816(triton::DotOp op, OpAdaptor adaptor,
                               adaptor);
 }
 
-// Simply port the old code here to avoid large difference and make debugging
-// and profiling easier.
+// Simply port the old code here to avoid large difference and make
+// debugging and profiling easier.
 LogicalResult
 DotOpConversion::convertMMA884(triton::DotOp op, DotOpAdaptor adaptor,
                                ConversionPatternRewriter &rewriter) const {
@@ -4657,8 +4711,8 @@ struct InsertSliceAsyncOpConversion
         srcStrides.emplace_back(smemObj.strides[i]);
       }
     }
-    // Compute the offset based on the original dimensions of the shared memory
-    // object
+    // Compute the offset based on the original dimensions of the shared
+    // memory object
     auto dstOffset = dot(rewriter, loc, offsetVals, smemObj.strides);
     auto dstPtrTy =
         ptr_ty(getTypeConverter()->convertType(resTy.getElementType()), 3);
@@ -4676,7 +4730,8 @@ struct InsertSliceAsyncOpConversion
     if (llOther) {
       // TODO(Keren): support "other" tensor.
       // It's not necessary for now because the pipeline pass will skip
-      // generating insert_slice_async if the load op has any "other" tensor.
+      // generating insert_slice_async if the load op has any "other"
+      // tensor.
       assert(false && "insert_slice_async: Other value not supported yet");
       otherElems = getLLVMElems(other, llOther, rewriter, loc);
       assert(srcElems.size() == otherElems.size());
@@ -4698,8 +4753,8 @@ struct InsertSliceAsyncOpConversion
     auto numSwizzleRows = std::max<unsigned>(
         (perPhase * maxPhase) / threadsPerCTA[inOrder[1]], 1);
     // A sharedLayout encoding has a "vec" parameter.
-    // On the column dimension, if inVec > outVec, it means we have to divide
-    // single vector read into multiple ones
+    // On the column dimension, if inVec > outVec, it means we have to
+    // divide single vector read into multiple ones
     auto numVecCols = std::max<unsigned>(inVec / outVec, 1);
 
     auto srcIndices = emitIndices(loc, rewriter, srcBlockedLayout, srcShape);
@@ -4726,8 +4781,8 @@ struct InsertSliceAsyncOpConversion
 
       if (!tileOffsetMap.count({tileVecIdxRow, tileVecIdxCol})) {
         // Swizzling
-        // Since the swizzling index is related to outVec, and we know minVec
-        // already, inVec doesn't matter
+        // Since the swizzling index is related to outVec, and we know
+        // minVec already, inVec doesn't matter
         //
         // (Numbers represent row indices)
         // Example1:
@@ -5007,11 +5062,11 @@ public:
     // setp 2: Convert SCF to CFG
     // step 3: Convert FuncOp to LLVMFuncOp via partial conversion
     // step 4: Convert the rest of ops via partial conversion
-    // The reason for putting step 1 before step 2 is that the membar analysis
-    // currently only supports SCF but not CFG.
-    // The reason for a seperation between 1/4 is that, step 3 is out of
-    // the scope of Dialect Conversion, thus we need to make sure the smem
-    // is not revised during the conversion of step 4.
+    // The reason for putting step 1 before step 2 is that the membar
+    // analysis currently only supports SCF but not CFG. The reason for a
+    // seperation between 1/4 is that, step 3 is out of the scope of Dialect
+    // Conversion, thus we need to make sure the smem is not revised during
+    // the conversion of step 4.
     Allocation allocation(mod);
     MembarAnalysis membar(&allocation);
 
@@ -5083,8 +5138,8 @@ void ConvertTritonGPUToLLVM::initSharedMemory(
   OpBuilder b(mod.getBodyRegion());
   auto loc = mod.getLoc();
   auto elemTy = typeConverter.convertType(b.getIntegerType(8));
-  // Set array size 0 and external linkage indicates that we use dynamic shared
-  // allocation to allow a larger shared memory size for each kernel.
+  // Set array size 0 and external linkage indicates that we use dynamic
+  // shared allocation to allow a larger shared memory size for each kernel.
   auto arrayTy = LLVM::LLVMArrayType::get(elemTy, 0);
   auto global = b.create<LLVM::GlobalOp>(
       loc, arrayTy, /*isConstant=*/false, LLVM::Linkage::External,
