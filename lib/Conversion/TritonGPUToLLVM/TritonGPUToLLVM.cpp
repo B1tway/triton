@@ -1035,7 +1035,6 @@ struct LoadOpConversion
                        : retTys[0];
 
       Value ret = gcnBuilder.launch(rewriter, loc, retTy);
-
 #else
       // TODO(Superjomn) Add cache policy fields to StoreOp.
       // TODO(Superjomn) Deal with cache policy here.
