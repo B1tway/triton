@@ -1005,23 +1005,29 @@ struct LoadOpConversion
       assert(wordNElems * nWords * numVecs == numElems);
 #ifdef USE_ROCM
       GCNBuilder gcnBuilder;
-      auto &global_load = *gcnBuilder.create<GCNMemInstr>("global_load");
 
       const std::string readConstraint = "v";
       const std::string writeConstraint = "=v";
 
       auto *dstsOpr = gcnBuilder.newListOperand();
-      auto *opr = gcnBuilder.newOperand(writeConstraint); // =v operations
-      dstsOpr->listAppend(opr);
+      for (size_t wordIdx = 0; wordIdx < nWords; ++wordIdx) {
+        auto *opr = gcnBuilder.newOperand(writeConstraint); // =v operations
+        dstsOpr->listAppend(opr);
+      }
 
       auto *addrOpr = gcnBuilder.newAddrOperand(ptrElems[vecStart], "v");
 
-      auto *offsetMod = gcnBuilder.newModifier("offset", "4");
-      auto *ldsMod = gcnBuilder.newModifier("lds", "");
+      for (size_t ii = 0; ii < vec; ++ii) {
+        auto &gload =
+            gcnBuilder.create<GCNMemInstr>("global_load")->type(width);
+        unsigned offset = ii * (width / 8);
+        auto *offsetMod =
+            gcnBuilder.newModifier("offset", std::to_string(offset));
+        gload({dstsOpr->listGet(ii), addrOpr}, {offsetMod});
+      }
 
-      global_load = global_load.type(width * 2);
-
-      global_load({dstsOpr, addrOpr}, {offsetMod, ldsMod});
+      auto &wait_cnt = *gcnBuilder.create<>("s_waitcnt vmcnt(0)");
+      wait_cnt();
 
       SmallVector<Type> retTys(nWords, IntegerType::get(getContext(), width));
       Type retTy = retTys.size() > 1
@@ -1029,6 +1035,7 @@ struct LoadOpConversion
                        : retTys[0];
 
       Value ret = gcnBuilder.launch(rewriter, loc, retTy);
+
 #else
       // TODO(Superjomn) Add cache policy fields to StoreOp.
       // TODO(Superjomn) Deal with cache policy here.
@@ -1249,10 +1256,17 @@ struct StoreOpConversion
       GCNBuilder gcnBuilder;
       auto *asmArgList = gcnBuilder.newListOperand(asmArgs);
       auto *asmAddr = gcnBuilder.newAddrOperand(ptrElems[vecStart], "v");
-      auto &gcnStoreInstr =
-          gcnBuilder.create<GCNMemInstr>("global_store")->type(2 * width);
+      for (size_t ii = 0; ii < vec; ++ii) {
+        auto &gstore =
+            gcnBuilder.create<GCNMemInstr>("global_store")->type(width);
+        unsigned offset = ii * (width / 8);
+        auto *offsetMod =
+            gcnBuilder.newModifier("offset", std::to_string(offset));
+        gstore({asmAddr, asmArgList->listGet(ii)}, {offsetMod});
+      }
 
-      gcnStoreInstr(asmAddr, asmArgList);
+      auto &wait_cnt = *gcnBuilder.create<>("s_waitcnt vmcnt(0)");
+      wait_cnt();
 
       Type boolTy = getTypeConverter()->convertType(rewriter.getIntegerType(1));
       llvm::SmallVector<Type> argTys({boolTy, ptr.getType()});
