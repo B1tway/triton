@@ -6,7 +6,7 @@ import triton._C.libtriton.triton as libtriton
 if __name__ == '__main__':
 
     # valid source and target formats
-    VALID_FORMATS = ['triton-ir', 'triton-gpu-ir', 'llvm-ir', 'ptx', 'amdgcn']
+    VALID_FORMATS = ['triton-ir', 'triton-gpu-ir', 'llvm-ir', 'ptx', 'amdgcn', 'hsaco']
 
     # set up the argument parser
     # TODO: conditional requirements
@@ -63,4 +63,10 @@ if __name__ == '__main__':
             raise argparse.ArgumentError(None, "Must specify --gfx for AMDGCN compilation")
         # llvm-ir -> amdgcn
         module = triton.compiler.make_amdgcn(module, args.gfx)
+    if args.target == 'hsaco':
+        if not args.gfx:
+            raise argparse.ArgumentError(None, "Must specify --gfx for AMDGCN compilation")
+        hsaco_path = triton.compiler.llir_to_hsaco(module, "gfx" + str(args.gfx))
+        print(hsaco_path)
+        exit(0)
     print(module)

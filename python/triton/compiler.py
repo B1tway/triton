@@ -893,7 +893,10 @@ def make_llvm_ir(mod):
 def make_amdgcn(mod: Any, gfx_number: int):
     return _triton.translate_llvmir_to_amdgcn(mod, gfx_number)
 
-def make_ptx(mod: Any, compute_capability: int, ptx_version: int) -> Tuple[str, int]:
+def llir_to_hsaco(mod: Any, gfx_arch: str) -> str:
+    return _triton.translate_llvmir_to_hsaco(mod, gfx_arch)
+
+def make_ptx(mod: Any, compute_capability: int, ptx_version: int) -> Tuple[str, str]:
     '''
     Translate TritonGPU module to PTX code.
     :param mod: a TritonGPU dialect module
