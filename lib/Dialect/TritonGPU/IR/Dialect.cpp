@@ -50,6 +50,8 @@ SmallVector<unsigned> getElemsPerThread(Attribute layout,
     return sliceLayout.getElemsPerThread(shape, eltTy);
   } else if (auto mmaLayout = layout.dyn_cast<MmaEncodingAttr>()) {
     return mmaLayout.getElemsPerThread(shape, eltTy);
+  } else if (auto mfmaLayout = layout.dyn_cast<MfmaEncodingAttr>()) {
+    return mfmaLayout.getElemsPerThread(shape, eltTy);
   } else {
     assert(0 && "getElemsPerThread not implemented");
     return SmallVector<unsigned>();
@@ -84,7 +86,7 @@ SmallVector<unsigned> getThreadsPerWarp(Attribute layout) {
       return {8, 4};
   }
   if (auto mfmaLayout = layout.dyn_cast<MfmaEncodingAttr>()) {
-    return {32, 2};
+    return {2, 32};
   }
   if (auto sliceLayout = layout.dyn_cast<SliceEncodingAttr>()) {
     auto parent = sliceLayout.getParent();
@@ -138,6 +140,10 @@ SmallVector<unsigned> getWarpsPerCTA(Attribute layout) {
     for (unsigned i = 0; i < warpsPerCTA.size(); i++)
       warpsPerCTA[i] *= parentWarpsPerCTA[sliceLayout.getDim()];
     return warpsPerCTA;
+  }
+  if (auto mfmaLayout = layout.dyn_cast<MfmaEncodingAttr>()){
+    return SmallVector<unsigned>(mfmaLayout.getWarpsPerCTA().begin(),
+                                 mfmaLayout.getWarpsPerCTA().end());
   }
   assert(0 && "getWarpsPerCTA not implemented");
   return {};
@@ -228,7 +234,7 @@ SmallVector<unsigned> getContigPerThread(Attribute layout) {
     assert(mmaLayout.isVolta() || mmaLayout.isAmpere());
     return {1, 2};
   } else if (layout.isa<MfmaEncodingAttr>()) {
-    return {1, 1};
+    return {4, 1};
   } else if (auto sliceLayout = layout.dyn_cast<SliceEncodingAttr>()) {
     auto parentLayout = sliceLayout.getParent();
     return getContigPerThread(parentLayout);

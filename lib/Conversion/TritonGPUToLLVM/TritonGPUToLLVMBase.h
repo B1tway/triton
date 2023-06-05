@@ -579,7 +579,7 @@ public:
         if (mmaLayout.isAmpere())
           result = emitBaseIndexForMmaLayoutV2(loc, rewriter, mmaLayout, type);
       } else if (auto mfmaLayout = layout.dyn_cast<MfmaEncodingAttr>()) {
-        llvm_unreachable("MfmaEncodingAttr is not implemented yet");
+        result = emitBaseIndexForMfmaLayout(loc, rewriter, mfmaLayout, type);
       } else if (auto sliceLayout = layout.dyn_cast<SliceEncodingAttr>()) {
         auto parentLayout = sliceLayout.getParent();
         auto parentShape = sliceLayout.paddedShape(type.getShape());
@@ -609,7 +609,7 @@ public:
         return emitOffsetForMmaLayoutV2(mmaLayout, type);
     }
     if (auto mfmaLayout = layout.dyn_cast<MfmaEncodingAttr>()) {
-      llvm_unreachable("MfmaEncodingAttr is not implemented yet");
+      return emitOffsetForMfmaLayout(mfmaLayout, type);
     }
     if (auto sliceLayout = layout.dyn_cast<SliceEncodingAttr>())
       return emitOffsetForSliceLayout(sliceLayout, type);
@@ -637,6 +637,8 @@ public:
         result = emitIndicesForDistributedLayout(loc, b, blocked, type);
       } else if (auto mma = layout.dyn_cast<MmaEncodingAttr>()) {
         result = emitIndicesForDistributedLayout(loc, b, mma, type);
+      } else if (auto mfma = layout.dyn_cast<MfmaEncodingAttr>()){
+        result = emitIndicesForDistributedLayout(loc, b, mfma, type);
       } else if (auto slice = layout.dyn_cast<SliceEncodingAttr>()) {
         result = emitIndicesForDistributedLayout(loc, b, slice, type);
       } else {
@@ -931,6 +933,52 @@ private:
         ret.push_back({i, j + 1});
         ret.push_back({i + 8, j});
         ret.push_back({i + 8, j + 1});
+      }
+    }
+    return ret;
+  }
+
+  SmallVector<Value>
+  emitBaseIndexForMfmaLayout(Location loc, ConversionPatternRewriter &rewriter,
+                              const MfmaEncodingAttr &mfmaLayout,
+                              RankedTensorType type) const {
+    auto shape = type.getShape();
+    auto _warpsPerCTA = mfmaLayout.getWarpsPerCTA();
+    assert(_warpsPerCTA.size() == 2);
+    SmallVector<Value> warpsPerCTA = {i32_val(_warpsPerCTA[0]),
+                                      i32_val(_warpsPerCTA[1])};
+    Value threadId = getThreadId(rewriter, loc);
+    Value warpSize = i32_val(64);
+    Value laneId = urem(threadId, warpSize);
+    Value warpId = udiv(threadId, warpSize);
+    Value warpId0 = urem(urem(warpId, warpsPerCTA[0]), i32_val(shape[0] / 32));
+    Value warpId1 = urem(urem(udiv(warpId, warpsPerCTA[0]), warpsPerCTA[1]),
+                         i32_val(shape[1] / 32));
+    Value offWarp0 = mul(warpId0, i32_val(32));
+    Value offWarp1 = mul(warpId1, i32_val(32));
+
+    SmallVector<Value> multiDimBase(2);
+    multiDimBase[0] = add(mul(i32_val(4), udiv(laneId, i32_val(32))), offWarp0);
+    multiDimBase[1] = add(urem(laneId, i32_val(32)), offWarp1);
+
+    return multiDimBase;
+  }
+
+  SmallVector<SmallVector<unsigned>>
+  emitOffsetForMfmaLayout(const MfmaEncodingAttr &mfmaLayout,
+                           RankedTensorType type) const {
+    auto shape = type.getShape();
+    SmallVector<SmallVector<unsigned>> ret;
+
+    constexpr unsigned frag = 4;
+    for (unsigned i = 0; i < shape[0]; i += getShapePerCTA(mfmaLayout)[0]) {
+      for (unsigned j = 0; j < shape[1]; j += getShapePerCTA(mfmaLayout)[1]) {
+        for (unsigned stride = 0; stride < frag; stride++){
+          auto offset = stride << 3;
+          for (unsigned col = 0; col < frag; col++){
+            ret.push_back({i + offset + col, j});
+          }
+        }
       }
     }
     return ret;
